@@ -1,0 +1,200 @@
+<html lang="en">
+
+<input type="file" id="file-selector" multiple> <!-- hidden after files selected -->
+<div id="output" style="display: none" > <!-- initially hidden, but revealed when fully populated -->
+
+</div>
+<script>
+
+    /**********************************************************************************************************
+     * Reads one or more JSON files from disk and displays a CSV table of their combined contents (except for *
+     * array content).                                                                                        *
+     **********************************************************************************************************/
+
+    const fileSelector = document.getElementById('file-selector');
+    const output = document.getElementById('output');
+
+    // updated to the number of files selected by the user at selection time, then decremented each time a file is
+    // fully processed
+    let filesLeftToProcessCount;
+
+    /**
+     * The (expanding as file are processes) set of column names of the CSV table to be displayed. The strings added
+     * to this set must be CSV safe, i.e. not contain comma or newline. Each name reflects a key-name path found
+     * through least one processed JSON object from root to leaf.  For example the objects
+     *
+     *   { "name": "matt", "record": { "id": 3, "enabled": true } }
+     *   { "dog": { "cat": "never" } }
+     *
+     * would produce the set { "name", "record.id", "record.enabled", "dog.cat" }
+     *
+     * @type {Set<String>}
+     */
+    const columnNamesAccum = new Set();
+
+    /**
+     * A (expanding as file are processes) list of maps of strings onto strings. Each element of the list is a
+     * flattened, stringified, and possibly abbreviated (we ignore arrays) version of a JSON object parsed from
+     * a user selected file.  All string keys and values of each map must be CSV safe, i.e. not contain comma or
+     * newline.
+     *
+     * Each key of a map reflects a key-name path found in the corresponding object. The value for that key is the
+     * string version of the child node of that path.
+     *
+     * For example the objects
+     *
+     *   { "name": "matt", "record": { "id": 3, "enabled": true } }
+     *   { "dog": { "cat": "never" } }
+     *
+     * would correspond to the maps:
+     *
+     *   "name" -> "matt", "record.id" -> "3", "record.enabled" -> "true"
+     *   "dog.cat" -> "never"
+     */
+    const rowsAccum = [];
+
+    fileSelector.addEventListener('change', (event) =>
+    {
+        fileSelector.style.display = "none";
+        const filesList = event.target.files;
+        filesLeftToProcessCount = filesList.length;
+        for (const file of filesList)
+            processFileAsync(file)
+    });
+
+    /**
+     * Reads the text content of the given file (asynchronously), parses the content from JSON to an object, updates
+     * `columnNamesAccum` with all discovered key-name paths, and finally translates and updates `rowsAccum` with a map
+     * corresponding to the object (see `rowsAccum` for format details). Decrements filesLeftToProcessCount.
+     *
+     * If this function is called on the last file to process, also populates `output` and makes the element visible.
+     *
+     * @param file an element of a `event.target.files` value originating from a file selector change event.
+     */
+    function processFileAsync(file)
+    {
+        const reader = new FileReader();
+        reader.addEventListener('load', (event) =>
+        {
+           const fileObject = parseJsonFromFile(file.name, event.target.result);
+           const columnNameToValue = makeColumnMapFromObject(fileObject);
+
+           rowsAccum.push(columnNameToValue);
+           for(const columnName of columnNameToValue.keys())
+               columnNamesAccum.add(columnName);
+
+           filesLeftToProcessCount--;
+           if(filesLeftToProcessCount === 0)
+           {
+               populateOutput(columnNamesAccum, rowsAccum);
+               output.style.display = "block";
+           }
+        });
+        reader.readAsText(file);
+    }
+
+    function parseJsonFromFile(filename, text)
+    {
+        try
+        {
+            return JSON.parse(text);
+        }
+        catch (e)
+        {
+            alert("invalid json in " + filename)
+        }
+    }
+
+    /**
+     * Returns a flattened string-to-string map version of the given object.  All keys and values of the map will
+     * be CSV safe.
+     *
+     * For example the object
+     *
+     *   { "name": "matt", "record": { "id": 3, "enabled": true } }
+     *
+     * would correspond to the map
+     *
+     *   "name" -> "matt", "record.id" -> "3", "record.enabled" -> "true"
+     *
+     * For example the object
+     *
+     *   { "dog": { "cat": "never" } }
+     *
+     * would correspond to the map
+     *
+     *   "dog.cat" -> "never"
+     */
+    function makeColumnMapFromObject(object)
+    {
+        function makeColumnMapFromObjectHelp(object, keyPrefix, map)
+        {
+            if (object === null || object === undefined)
+                return map;
+
+            for (const key in object)
+            {
+                const value = object[key];
+                const valueCsvSafe = value.toString().replace(/,/g, "_").replace(/\n/g, "");
+                const keyCsvSafe = key.toString().replace(/,/g, "_").replace(/\n/g, "");
+                if (typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+                {
+                    map.set(keyPrefix + keyCsvSafe, valueCsvSafe)
+                }
+                else if (typeof value === "object")
+                {
+                    makeColumnMapFromObjectHelp(value, keyCsvSafe + ".", map)
+                }
+            }
+
+            return map;
+        }
+
+        return makeColumnMapFromObjectHelp(object, "", new Map());
+    }
+
+    function populateOutput(columnNames, rowsAccum)
+    {
+        if(columnNames.size < 1 || rowsAccum.size < 1)
+            return;
+
+        rowsAccum = rowsAccum.sort((a,b) => a.size - b.size); // if we are lucky enough for different EMAs to have
+                                                              // different numbers of questions, clusters EMA responses
+                                                              // in the table
+
+        let columnNamesAscending = []; // convert given set to array for sorting
+        for(const name of columnNames)
+            columnNamesAscending.push(name);
+        columnNamesAscending = columnNamesAscending.sort(); // clusters columns with "response" in the path together to
+                                                            // cluster user submitted data away from system metadata
+                                                            // in the output table
+
+
+        /*
+         * Create header row of the CSV table from the column names.
+         */
+        let headerRowTextAccum = columnNamesAscending[0];
+        for(let i = 1; i<columnNamesAscending.length; i++)
+            headerRowTextAccum += "," +  columnNamesAscending[i];
+        const div = document.createElement("div");
+        div.innerText = headerRowTextAccum;
+        output.appendChild(div);
+
+        /*
+         * Append one row to the CSV table for each given row.
+         */
+        for(const row of rowsAccum)
+        {
+            let rowTextAccum = row.has(columnNamesAscending[0]) ? row.get(columnNamesAscending[0]) : "";
+            for(let i = 1; i<columnNamesAscending.length; i++)
+                rowTextAccum += "," + (row.has(columnNamesAscending[i]) ? row.get(columnNamesAscending[i]) : "");
+
+            const div = document.createElement("div");
+            div.innerText = rowTextAccum;
+            output.appendChild(div)
+        }
+    }
+
+</script>
+
+</html>
